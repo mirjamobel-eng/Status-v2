@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vare optælling</title>
+<style>
+body { font-family: Arial; max-width: 600px; margin: 20px auto; padding: 0 16px; }
+input, button { font-size: 16px; padding: 10px; margin: 5px 0; width: 100%; box-sizing: border-box; }
+button { cursor: pointer; }
+.knap-primaer { background: #c8102e; color: white; border: none; border-radius: 4px; }
+.knap-sekundaer { background: #eee; border: 1px solid #aaa; border-radius: 4px; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+td, th { border: 1px solid grey; padding: 6px; text-align: left; }
+td button { width: auto; padding: 2px 8px; margin: 0; }
+#scanner { width: 100%; margin: 10px 0; }
+.fejl { color: #c8102e; font-weight: bold; min-height: 1.2em; }
+.info { background: #f4f4f4; padding: 10px; border-radius: 4px; margin: 10px 0; }
+.side { display: none; }
+.side.aktiv { display: block; }
+</style>
+</head>
+<body>
+
+<h1>Vare optælling</h1>
+
+<!-- ============ SIDE 1: Søg / scan ============ -->
+<div id="side-soeg" class="side aktiv">
+  <button class="knap-sekundaer" id="scanKnap" onclick="skiftScanner()">📷 Start stregkode-scanner</button>
+  <div id="scanner"></div>
+
+  <label for="varenummer">Varenummer:</label>
+  <input id="varenummer" type="text" inputmode="numeric" placeholder="Skriv eller scan varenummer"
+         onkeydown="if (event.key === 'Enter') soeg()">
+  <button class="knap-primaer" onclick="soeg()">Søg</button>
+  <p class="fejl" id="soegFejl"></p>
+
+  <h2>Ark 2 - gemt lokalt</h2>
+  <table>
+    <thead><tr><th>Varenummer</th><th>Beskrivelse</th><th>Antal</th><th></th></tr></thead>
+    <tbody id="tabel"></tbody>
+  </table>
+  <button class="knap-sekundaer" onclick="hentCSV()">Download ark 2 som CSV</button>
+  <button class="knap-sekundaer" onclick="rydArk()">Ryd ark 2</button>
+</div>
+
+<!-- ============ SIDE 2: Indtast antal ============ -->
+<div id="side-antal" class="side">
+  <div class="info">
+    <div><b>Varenummer:</b> <span id="valgtNummer"></span></div>
+    <div><b>Beskrivelse:</b> <span id="valgtNavn"></span></div>
+  </div>
+
+  <label for="antal">Antal:</label>
+  <input id="antal" type="number" inputmode="numeric" step="1" min="0"
+         onkeydown="if (event.key === 'Enter') anvend()">
+  <button class="knap-primaer" onclick="anvend()">Anvend</button>
+  <button class="knap-sekundaer" onclick="visSide('soeg')">Tilbage</button>
+  <p class="fejl" id="antalFejl"></p>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+let varer = {};          // varenummer -> beskrivelse
+let valgtVare = null;    // den vare der er søgt frem
+let scanner = null;      // stregkode-scanneren
+let scannerKoerer = false;
+
+// 1. Læs vare_liste.csv (semikolon-separeret)
+fetch("vare_liste.csv")
+  .then(svar => svar.text())
+  .then(tekst => {
+    let linjer = tekst.trim().split(/\r?\n/);
+    linjer.shift(); // spring overskrift over
+    for (let linje of linjer) {
+      let [nummer, navn] = linje.split(";");
+      if (nummer) varer[nummer.trim()] = (navn || "").trim();
+    }
+  })
+  .catch(() => {
+    document.getElementById("soegFejl").textContent =
+      "Kunne ikke læse vare_liste.csv (åbn siden via en webserver / GitHub Pages).";
+  });
+
+// 2. Skift mellem side 1 og side 2
+function visSide(navn) {
+  document.getElementById("side-soeg").classList.toggle("aktiv", navn === "soeg");
+  document.getElementById("side-antal").classList.toggle("aktiv", navn === "antal");
+  if (navn === "soeg") {
+    document.getElementById("varenummer").value = "";
+    document.getElementById("varenummer").focus();
+    visTabel();
+  } else {
+    document.getElementById("antal").value = "";
+    document.getElementById("antalFejl").textContent = "";
+    document.getElementById("antal").focus();
+  }
+}
+
+// 3. Søg efter varenummer
+function soeg() {
+  let nummer = document.getElementById("varenummer").value.trim();
+  let fejl = document.getElementById("soegFejl");
+  fejl.textContent = "";
+
+  if (nummer === "") {
+    fejl.textContent = "Skriv et varenummer.";
+    return;
+  }
+  if (!(nummer in varer)) {
+    fejl.textContent = "Varenummer " + nummer + " findes ikke i varelisten.";
+    return;
+  }
+
+  stopScanner();
+  valgtVare = { nummer: nummer, navn: varer[nummer] };
+  document.getElementById("valgtNummer").textContent = valgtVare.nummer;
+  document.getElementById("valgtNavn").textContent = valgtVare.navn;
+  visSide("antal");
+}
+
+// 4. Anvend: gem linjen i ark 2
+function anvend() {
+  let tekst = document.getElementById("antal").value.trim();
+  let fejl = document.getElementById("antalFejl");
+
+  if (!/^\d+$/.test(tekst)) {
+    fejl.textContent = "Antal skal være et helt tal.";
+    return;
+  }
+
+  let data = hentData();
+  data.push({ nummer: valgtVare.nummer, navn: valgtVare.navn, antal: parseInt(tekst, 10) });
+  localStorage.setItem("ark2", JSON.stringify(data));
+  visSide("soeg");
+}
+
+// 5. Lokal lagring
+function hentData() {
+  try { return JSON.parse(localStorage.getItem("ark2") || "[]"); }
+  catch { return []; }
+}
+
+function escape(t) {
+  return String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function visTabel() {
+  let data = hentData();
+  let tabel = document.getElementById("tabel");
+  tabel.innerHTML = "";
+  data.forEach((r, i) => {
+    tabel.innerHTML += `<tr><td>${escape(r.nummer)}</td><td>${escape(r.navn)}</td>` +
+      `<td>${escape(r.antal)}</td><td><button onclick="sletLinje(${i})">✕</button></td></tr>`;
+  });
+}
+
+function sletLinje(i) {
+  let data = hentData();
+  data.splice(i, 1);
+  localStorage.setItem("ark2", JSON.stringify(data));
+  visTabel();
+}
+
+function rydArk() {
+  if (confirm("Vil du slette alle linjer i ark 2?")) {
+    localStorage.removeItem("ark2");
+    visTabel();
+  }
+}
+
+// 6. Download ark 2 som CSV (semikolon, så Excel på dansk åbner den korrekt)
+function hentCSV() {
+  let data = hentData();
+  let csv = "varenummer;beskrivelse;antal\n";
+  for (let r of data) {
+    csv += `${r.nummer};${r.navn};${r.antal}\n`;
+  }
+  let blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }); // BOM så æøå vises rigtigt
+  let link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "ark2.csv";
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+// 7. Stregkode-scanner (kamera)
+function skiftScanner() {
+  if (scannerKoerer) stopScanner(); else startScanner();
+}
+
+function startScanner() {
+  if (typeof Html5Qrcode === "undefined") {
+    document.getElementById("soegFejl").textContent = "Scanner-biblioteket kunne ikke indlæses.";
+    return;
+  }
+  scanner = scanner || new Html5Qrcode("scanner");
+  scanner.start(
+    { facingMode: "environment" },          // bagkamera
+    { fps: 10, qrbox: { width: 280, height: 150 } },
+    kode => {                                // kode fundet
+      document.getElementById("varenummer").value = kode;
+      soeg();
+    }
+  ).then(() => {
+    scannerKoerer = true;
+    document.getElementById("scanKnap").textContent = "⏹ Stop scanner";
+  }).catch(err => {
+    document.getElementById("soegFejl").textContent = "Kunne ikke starte kamera: " + err;
+  });
+}
+
+function stopScanner() {
+  if (scanner && scannerKoerer) {
+    scanner.stop().catch(() => {});
+    scannerKoerer = false;
+    document.getElementById("scanKnap").textContent = "📷 Start stregkode-scanner";
+  }
+}
+
+visTabel();
+</script>
+</body>
+</html>
